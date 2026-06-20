@@ -62,6 +62,7 @@ class App:
         self._really_quit = False
         self._show_event = None
         self._stop_event = threading.Event()
+        self._loaded_once = False
 
     # ================= Api(暴露给 JS) =================
     # ---- 搜索与动作 ----
@@ -250,6 +251,19 @@ class App:
         if self._native:
             self._native.install()
 
+    def _on_loaded(self):
+        """页面 + WebView2 预热完成(见 run 的屏幕外预热):
+        托盘启动则隐藏到托盘;手动启动则居中显示。只处理首次加载。"""
+        if self._loaded_once:
+            return
+        self._loaded_once = True
+        if not self._native:
+            return
+        if self._start_hidden:
+            self._native.hide()
+        else:
+            self._native.show_front()
+
     def _show_event_waiter(self):
         """等待"第二次启动"的信号 → 呼出已有窗口。"""
         if not self._show_event:
@@ -300,10 +314,16 @@ class App:
 
     def run(self):
         prefs = settings.load()
+        # 冷启动预热:始终把窗口创建为"可见但置于屏幕外",强制 WebView2 立刻初始化
+        # 并加载页面;页面就绪(loaded 事件)后,托盘模式隐藏、手动模式居中显示。
+        # 若按 hidden=True 创建,WebView2 会推迟到首次唤出才初始化 —— 表现为首次
+        # 唤出慢 1~2s,且此时页面 JS 尚未就绪,__glanceShow/__glanceScope 被跳过
+        # (范围抓取失效,退回全局)。预热后首次唤出即"温"的:又快、范围又准。
         self._window = webview.create_window(
             "Glance",
             url=_INDEX,
             js_api=self,
+            x=-32000, y=-32000,  # 屏幕外预热,避免可见闪烁
             # 高度按内容自适应(空时仅一条搜索栏),起始给个紧凑值避免首帧过高。
             width=prefs.get("win_w", 720), height=152,
             frameless=True,
@@ -311,10 +331,11 @@ class App:
             on_top=True,
             background_color="#FFFFFF",
             min_size=(460, 120),
-            hidden=self._start_hidden,
+            hidden=False,
         )
         self._native = NativeWindow(self._window)
         self._window.events.shown += self._on_shown
+        self._window.events.loaded += self._on_loaded
         self._window.events.closing += self._on_closing
         webview.start(self._on_start, gui="edgechromium")
 
