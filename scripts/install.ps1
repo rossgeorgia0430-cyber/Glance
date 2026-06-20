@@ -3,7 +3,7 @@
   - 安装到 %ProgramFiles%\Glance（索引服务以 LocalSystem 运行，程序目录必须防普通用户篡改）
   - 内置并安装 Glance 专属索引服务，不安装/启动桌面版 Everything
   - 创建开始菜单 + 桌面快捷方式
-  - 登录自启；开始菜单快捷方式同时提供 Ctrl+Alt+S 冷启动
+  - 登录自启；开始菜单快捷方式提供 Ctrl+Alt+Shift+S 冷启动
 #>
 [CmdletBinding()]
 param([switch]$NoShortcut, [switch]$NoAutostart, [switch]$Quiet)
@@ -129,7 +129,8 @@ Set-Service -Name $ServiceName -DisplayName $ServiceDisplayName `
 if ($svc.Status -ne 'Running') { Start-Service -Name $ServiceName }
 Info '索引服务：已就绪（后台无界面）'
 
-# [6/7] 快捷方式；Start Menu 的 Hotkey 让 Glance 完全退出后也可冷启动
+# [6/7] 快捷方式；Ctrl+Alt+S 留给常驻进程的 RegisterHotKey，避免和 .lnk
+# 快捷键冲突。完全退出后，开始菜单快捷方式仍可用 Ctrl+Alt+Shift+S 冷启动。
 if (-not $NoShortcut) {
   $wsh = New-Object -ComObject WScript.Shell
   $startDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
@@ -143,11 +144,11 @@ if (-not $NoShortcut) {
     $sc.WorkingDirectory = $Target
     $sc.IconLocation = "$Exe,0"
     $sc.Description = 'Glance —— 文件搜索'
-    if ($entry[1]) { $sc.Hotkey = 'CTRL+ALT+S' }
+    if ($entry[1]) { $sc.Hotkey = 'CTRL+ALT+SHIFT+S' }
     $sc.Save()
   }
   [void][Runtime.InteropServices.Marshal]::ReleaseComObject($wsh)
-  Info '已创建快捷方式（Ctrl+Alt+S 支持冷启动）'
+  Info '已创建快捷方式（Ctrl+Alt+Shift+S 支持冷启动）'
 }
 
 # [7/7] 登录自启（隐藏常驻）；冷启动快捷键仍可在退出后重新拉起
