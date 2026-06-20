@@ -10,6 +10,7 @@ Glance 常驻主程序。
 import ctypes
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -63,12 +64,34 @@ class App:
         self._show_event = None
         self._stop_event = threading.Event()
         self._loaded_once = False
+        # 页面可以在 WebView2 已创建但 JS bridge 尚未可用时接收到热键。
+        # 不要丢掉这些指令：等前端通过 ui_ready 握手后按原顺序投递。
+        self._ui_ready = False
+        self._pending_js = []
+        self._js_lock = threading.RLock()
+        # pywebview 的 Edge 后端会同步等候 JS 求值结果；若从 WinForms UI 线程
+        # 调用会造成 UI 死锁。因此始终由单一后台线程顺序执行。
+        self._js_commands = queue.Queue()
+        self._js_worker = threading.Thread(target=self._js_dispatch_loop,
+                                           daemon=True, name="GlanceJs")
+        self._js_worker.start()
+        # 每次呼出递增；避免较慢的旧 COM 查询把范围写回到较新的呼出。
+        self._summon_id = 0
 
     # ================= Api(暴露给 JS) =================
     # ---- 搜索与动作 ----
     def status(self):
         return {"available": everything.is_available(),
                 "ready": everything.is_ready()}
+
+    def ui_ready(self):
+        """前端 JS bridge 已可调用；补发初始化期间积压的 UI 指令。"""
+        with self._js_lock:
+            self._ui_ready = True
+            pending, self._pending_js = self._pending_js, []
+            for code in pending:
+                self._dispatch_js_locked(code)
+        return {"ok": True}
 
     def search(self, query, scope=""):
         try:
@@ -180,6 +203,12 @@ class App:
         目录解析走 Shell COM(相对慢),放后台线程,避免拖慢唤出 —— 先抓前台
         句柄(极快、无 COM),立刻显示窗口,范围一会儿再补上。
         """
+        # 在抓取前台窗口前递增标识。较早一次热键的 COM 解析即使晚到，也不会
+        # 覆盖本次呼出的范围。
+        with self._js_lock:
+            self._summon_id += 1
+            summon_id = self._summon_id
+
         hwnd = None
         try:
             from . import focus
@@ -190,10 +219,10 @@ class App:
             self._native.show_front()
         self._eval_js("window.__glanceShow && window.__glanceShow(%s)" % json.dumps(""))
         if hwnd:
-            threading.Thread(target=self._resolve_scope, args=(hwnd,),
+            threading.Thread(target=self._resolve_scope, args=(hwnd, summon_id),
                              daemon=True, name="GlanceScope").start()
 
-    def _resolve_scope(self, hwnd):
+    def _resolve_scope(self, hwnd, summon_id):
         """后台线程:COM 解析前台目录,完成后推送范围到前端。"""
         folder = ""
         try:
@@ -202,18 +231,41 @@ class App:
         except Exception:
             folder = ""
         if folder:
-            self._eval_js("window.__glanceScope && window.__glanceScope(%s)" % json.dumps(folder))
+            with self._js_lock:
+                if summon_id != self._summon_id:
+                    return
+                self._eval_js_locked(
+                    "window.__glanceScope && window.__glanceScope(%s)" % json.dumps(folder))
 
     def _eval_js(self, code):
-        try:
-            if self._window:
-                self._window.evaluate_js(code)
-        except Exception:
-            pass
+        """顺序执行 JS；页面未就绪时保留而非静默丢弃。"""
+        with self._js_lock:
+            self._eval_js_locked(code)
+
+    def _eval_js_locked(self, code):
+        if not self._ui_ready:
+            self._pending_js.append(code)
+            return
+        self._dispatch_js_locked(code)
+
+    def _dispatch_js_locked(self, code):
+        self._js_commands.put(code)
+
+    def _js_dispatch_loop(self):
+        while True:
+            code = self._js_commands.get()
+            if code is None:
+                return
+            try:
+                if self._window:
+                    self._window.evaluate_js(code)
+            except Exception:
+                pass
 
     def quit(self):
         self._really_quit = True
         self._stop_event.set()
+        self._js_commands.put(None)
         try:
             if self._show_event:
                 _kernel32.SetEvent(self._show_event)
@@ -278,13 +330,9 @@ class App:
                 time.sleep(0.5)  # 兜底:句柄异常也绝不忙等
 
     def _notify_backend(self, ready):
-        try:
-            if self._window:
-                self._window.evaluate_js(
-                    "window.__glanceBackend && window.__glanceBackend(%s)"
-                    % ("true" if ready else "false"))
-        except Exception:
-            pass
+        self._eval_js(
+            "window.__glanceBackend && window.__glanceBackend(%s)"
+            % ("true" if ready else "false"))
 
     def _backend_supervisor(self):
         """持续守护内置索引；被结束后自动拉起，建库完成后通知前端。"""

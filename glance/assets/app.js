@@ -20,6 +20,9 @@ let fitRaf = null;
 /* ---------- 就绪 ---------- */
 window.addEventListener('pywebviewready', async () => {
   api = window.pywebview.api;
+  // 先通知 Python：此时本文件已完整执行，__glanceShow/__glanceScope 可用。
+  // 热键若早于 bridge 初始化抵达，后端会在这里按顺序补发而不是静默丢失。
+  try { await api.ui_ready(); } catch (e) { /* ignore */ }
   await bootTheme();
   try {
     const st = await api.status();
