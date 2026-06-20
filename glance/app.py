@@ -174,19 +174,39 @@ class App:
 
     # ================= 生命周期 =================
     def summon(self):
-        """呼出:先抓前台目录作范围,再显示并聚焦。"""
+        """呼出:立即显示并聚焦(空范围),前台目录在后台异步解析后再推送范围。
+
+        目录解析走 Shell COM(相对慢),放后台线程,避免拖慢唤出 —— 先抓前台
+        句柄(极快、无 COM),立刻显示窗口,范围一会儿再补上。
+        """
+        hwnd = None
+        try:
+            from . import focus
+            hwnd = focus.foreground_explorer_hwnd()  # 极快,无 COM
+        except Exception:
+            hwnd = None
+        if self._native:
+            self._native.show_front()
+        self._eval_js("window.__glanceShow && window.__glanceShow(%s)" % json.dumps(""))
+        if hwnd:
+            threading.Thread(target=self._resolve_scope, args=(hwnd,),
+                             daemon=True, name="GlanceScope").start()
+
+    def _resolve_scope(self, hwnd):
+        """后台线程:COM 解析前台目录,完成后推送范围到前端。"""
         folder = ""
         try:
             from . import focus
-            folder = focus.foreground_folder() or ""
+            folder = focus.explorer_folder_for(hwnd) or ""
         except Exception:
             folder = ""
-        if self._native:
-            self._native.show_front()
+        if folder:
+            self._eval_js("window.__glanceScope && window.__glanceScope(%s)" % json.dumps(folder))
+
+    def _eval_js(self, code):
         try:
             if self._window:
-                self._window.evaluate_js(
-                    "window.__glanceShow && window.__glanceShow(%s)" % json.dumps(folder))
+                self._window.evaluate_js(code)
         except Exception:
             pass
 

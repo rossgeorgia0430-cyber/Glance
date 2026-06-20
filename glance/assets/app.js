@@ -15,7 +15,6 @@ let reqId = 0;
 let debounceTimer = null;
 let currentScope = '';
 let backendReady = true;   // Everything 索引是否就绪(status 会校正)
-let heightLocked = false;  // 用户手动拖过竖向边框后,改为手动控高,不再自适应
 let fitRaf = null;
 
 /* ---------- 就绪 ---------- */
@@ -216,6 +215,11 @@ window.__glanceShow = function (scope) {
   scheduleFit();
 };
 
+/* 范围钩子:前台目录由 Python 后台 COM 解析完成后推送(不抢焦点、不清输入) */
+window.__glanceScope = function (scope) {
+  setScope(scope || '');
+};
+
 /* ---------- 选择 / 动作 ---------- */
 function setSel(i) {
   if (!items.length) return;
@@ -287,7 +291,6 @@ document.querySelectorAll('.resize-handle').forEach((h) => {
     if (e.button !== 0) return;
     e.preventDefault();
     const edge = RH[[...h.classList].find((c) => c.startsWith('rh-'))];
-    if (edge && edge !== 'left' && edge !== 'right') heightLocked = true;  // 手动调竖向 → 锁定高度
     if (edge && api && api.win_resize) api.win_resize(edge);
   });
 });
@@ -304,7 +307,7 @@ function syncMaximized() {
 
 /* ---------- 自适应高度(空时仅搜索栏,随结果增高到上限后滚动) ---------- */
 function fitHeight() {
-  if (!api || !api.win_set_height || heightLocked) return;
+  if (!api || !api.win_set_height) return;
   if (document.documentElement.classList.contains('window-maximized')) return;
   const tb = $('#titlebar').offsetHeight;
   const sb = $('#searchbar').offsetHeight;
