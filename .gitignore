@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Build / 分发产物
+/build/
+/dist/
+/release/
+
+# 运行期产物：文件索引数据库（含本机文件路径，勿入库）
+*.db
+*.db-journal
+Everything*.db*
+
+# 本地工具配置
+.claude/
+
+# AI 助手文件（不纳入版本库）
+CLAUDE.md
+AGENTS.md
