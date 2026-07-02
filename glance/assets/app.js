@@ -38,6 +38,11 @@ window.__glanceBackend = function (ready) {
   else showBanner('正在准备文件索引…  首次启动需要几秒', 'info');
 };
 
+/* 全局热键注册失败通知:Python 端注册 Ctrl+Alt+S 失败后 evaluate_js 调用 */
+window.__glanceHotkeyFailed = function () {
+  showBanner('全局热键 Ctrl+Alt+S 注册失败，可能被其他程序占用', '');
+};
+
 /* ---------- 主题 ---------- */
 async function bootTheme() {
   let theme = null;
@@ -231,8 +236,8 @@ function scrollSelIntoView() { const r = elResults.children[sel]; if (r) r.scrol
 function act(kind, i) {
   const it = items[i];
   if (!it || !api) return;
-  if (kind === 'open') api.open_file(it.path);
-  else if (kind === 'reveal') api.reveal_in_folder(it.path);
+  if (kind === 'open') api.open_file(it.path).then((r) => { if (r && r.ok && api.win_close) api.win_close(); });
+  else if (kind === 'reveal') api.reveal_in_folder(it.path).then((r) => { if (r && r.ok && api.win_close) api.win_close(); });
   else if (kind === 'copy') api.copy_path(it.path).then((r) => { if (r && r.ok) toast('已复制路径'); });
   else if (kind === 'copyname') api.copy_name(it.path).then((r) => { if (r && r.ok) toast('已复制文件名'); });
 }
@@ -254,6 +259,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'ArrowUp') { e.preventDefault(); setSel(sel - 1); }
   else if (e.key === 'Enter') { e.preventDefault(); if (sel >= 0) act(e.ctrlKey ? 'reveal' : 'open', sel); }
   else if ((e.key === 'c' || e.key === 'C') && e.ctrlKey) {
+    if (document.activeElement === elQ && elQ.selectionStart !== elQ.selectionEnd) return;   // 输入框内有选中文字:交给浏览器默认复制
     if (sel >= 0) { e.preventDefault(); act(e.shiftKey ? 'copyname' : 'copy', sel); }
   }
   else if (e.key === 'Escape') {
@@ -338,8 +344,10 @@ window.addEventListener('resize', () => {
   syncMaximized();
   clearTimeout(sizeTimer);
   sizeTimer = setTimeout(() => {
-    if (api && api.save_size && !document.documentElement.classList.contains('window-maximized'))
-      api.save_size(window.innerWidth, window.innerHeight);
+    if (api && api.save_size && !document.documentElement.classList.contains('window-maximized')) {
+      const dpr = window.devicePixelRatio || 1;
+      api.save_size(Math.round(window.innerWidth * dpr), Math.round(window.innerHeight * dpr));
+    }
   }, 500);
 });
 

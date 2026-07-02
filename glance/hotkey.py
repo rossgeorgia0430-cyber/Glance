@@ -29,13 +29,16 @@ class HotkeyThread(threading.Thread):
         self._vk = vk
         self._tid = None
         self.registered = False
+        self.ready = threading.Event()
 
     def run(self):
         self._tid = _kernel32.GetCurrentThreadId()
         if not _user32.RegisterHotKey(None, _HOTKEY_ID, self._mods, self._vk):
             self.registered = False
+            self.ready.set()
             return
         self.registered = True
+        self.ready.set()
         msg = wintypes.MSG()
         while True:
             ret = _user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
@@ -48,6 +51,12 @@ class HotkeyThread(threading.Thread):
                     pass
         _user32.UnregisterHotKey(None, _HOTKEY_ID)
 
+    def wait_registered(self, timeout=None):
+        self.ready.wait(timeout)
+        return self.registered
+
     def stop(self):
-        if self._tid:
-            _user32.PostThreadMessageW(self._tid, _WM_QUIT, 0, 0)
+        if self._tid is None:
+            return
+        self.ready.wait(1.0)
+        _user32.PostThreadMessageW(self._tid, _WM_QUIT, 0, 0)

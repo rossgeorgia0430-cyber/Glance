@@ -1,0 +1,11 @@
+# Glance 运行时依赖
+pywebview
+pythonnet
+rapidfuzz
+pystray
+Pillow
+pywin32
+pyperclip
+
+# 打包: python build.py
+pyinstaller

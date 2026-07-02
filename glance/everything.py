@@ -371,7 +371,6 @@ def _score(ql, name_lower, full, now):
 
 def search(query, limit=60, scan=800, scope_dir=None):
     """返回按相关性排序的结果列表(name/path/dir/is_dir/ext/size/mtime)。"""
-    import time
     query = (query or "").strip()
     if not query:
         return []

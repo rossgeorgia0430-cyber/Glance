@@ -19,8 +19,8 @@ function Test-Administrator {
 
 if (-not (Test-Administrator)) {
   Info '需要管理员权限移除索引服务，正在请求授权…'
-  $args = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-  $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $args -Wait -PassThru
+  $relaunchArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+  $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $relaunchArgs -Wait -PassThru
   exit $p.ExitCode
 }
 

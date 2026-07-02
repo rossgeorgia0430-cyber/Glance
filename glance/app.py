@@ -31,7 +31,7 @@ if not os.path.exists(_INDEX):  # 打包后(PyInstaller)assets 在 _MEIPASS/glan
 _MUTEX_NAME = "Glance_SingleInstance_Mutex_v2"
 _EVENT_NAME = "Glance_Show_Event_v2"
 
-_kernel32 = ctypes.windll.kernel32
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _ERROR_ALREADY_EXISTS = 183
 _WAIT_OBJECT_0 = 0x00000000
 _WAIT_FAILED = 0xFFFFFFFF
@@ -63,6 +63,7 @@ class App:
         self._show_event = None
         self._stop_event = threading.Event()
         self._loaded_once = False
+        self._summoned_early = False
 
     # ================= Api(暴露给 JS) =================
     # ---- 搜索与动作 ----
@@ -81,16 +82,16 @@ class App:
 
     def open_file(self, path):
         try:
-            frecency.record(path)
             os.startfile(os.path.normpath(path))  # type: ignore[attr-defined]
+            frecency.record(path)
             return {"ok": True}
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e)}
 
     def reveal_in_folder(self, path):
         try:
-            frecency.record(path)
             subprocess.Popen(["explorer.exe", f"/select,{os.path.normpath(path)}"])
+            frecency.record(path)
             return {"ok": True}
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e)}
@@ -180,6 +181,7 @@ class App:
         目录解析走 Shell COM(相对慢),放后台线程,避免拖慢唤出 —— 先抓前台
         句柄(极快、无 COM),立刻显示窗口,范围一会儿再补上。
         """
+        self._summoned_early = True
         hwnd = None
         try:
             from . import focus
@@ -260,7 +262,10 @@ class App:
         if not self._native:
             return
         if self._start_hidden:
-            self._native.hide()
+            if self._summoned_early:
+                self._native.show_front()
+            else:
+                self._native.hide()
         else:
             self._native.show_front()
 
@@ -299,12 +304,23 @@ class App:
                 previous = ready
             self._stop_event.wait(2.0 if ready else 1.0)
 
+    def _watch_hotkey_registration(self):
+        """等待热键注册结果,失败则通知前端(等页面预热完成再推送)。"""
+        if not self._hotkey:
+            return
+        if self._hotkey.wait_registered(5.0):
+            return
+        time.sleep(2.0)  # 等页面预热完成
+        self._eval_js("window.__glanceHotkeyFailed && window.__glanceHotkeyFailed()")
+
     def _on_start(self, *_):
         """GUI 循环起来后:装热键 + 托盘 + 单实例等待 + 后台守护索引。"""
         from .hotkey import HotkeyThread
         from .tray import Tray
         self._hotkey = HotkeyThread(self.summon)
         self._hotkey.start()
+        threading.Thread(target=self._watch_hotkey_registration, daemon=True,
+                         name="GlanceHotkeyWatcher").start()
         self._tray = Tray(on_show=self.summon, on_quit=self.quit)
         self._tray.run_detached()
         threading.Thread(target=self._show_event_waiter, daemon=True,
@@ -358,7 +374,7 @@ def main():
 
     # 单实例:已存在则通知其显示并退出
     mutex = _kernel32.CreateMutexW(None, False, _MUTEX_NAME)
-    if _kernel32.GetLastError() == _ERROR_ALREADY_EXISTS:
+    if ctypes.get_last_error() == _ERROR_ALREADY_EXISTS:
         _signal_existing_and_exit()
         return
 

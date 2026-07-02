@@ -5,6 +5,7 @@ Everything 自身的 run-count 不包含我们应用内的"打开",所以自管�
 """
 import json
 import os
+import threading
 import time
 
 from .settings import data_dir
@@ -15,6 +16,7 @@ _PRUNE_AT = 800
 _KEEP = 600
 
 _cache = None
+_lock = threading.Lock()
 
 
 def _path():
@@ -39,27 +41,29 @@ def _key(path: str) -> str:
 def record(path: str) -> None:
     if not path:
         return
-    d = _load()
-    e = d.get(_key(path)) or {"n": 0, "t": 0.0}
-    e["n"] = int(e.get("n", 0)) + 1
-    e["t"] = time.time()
-    d[_key(path)] = e
-    if len(d) > _PRUNE_AT:
-        items = sorted(d.items(), key=lambda kv: kv[1].get("t", 0), reverse=True)[:_KEEP]
-        d = dict(items)
-        globals()["_cache"] = d
-    try:
-        p = _path()
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, p)
-    except Exception:
-        pass
+    with _lock:
+        d = _load()
+        e = d.get(_key(path)) or {"n": 0, "t": 0.0}
+        e["n"] = int(e.get("n", 0)) + 1
+        e["t"] = time.time()
+        d[_key(path)] = e
+        if len(d) > _PRUNE_AT:
+            items = sorted(d.items(), key=lambda kv: kv[1].get("t", 0), reverse=True)[:_KEEP]
+            d = dict(items)
+            globals()["_cache"] = d
+        try:
+            p = _path()
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, p)
+        except Exception:
+            pass
 
 
 def boost(path: str, now: float = None) -> float:
     """返回 0.._MAX_BOOST 的加分,并入搜索重排打分。"""
-    e = _load().get(_key(path))
+    with _lock:
+        e = _load().get(_key(path))
     if not e:
         return 0.0
     now = now or time.time()

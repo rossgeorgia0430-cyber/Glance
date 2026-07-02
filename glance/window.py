@@ -167,7 +167,7 @@ class NativeWindow:
 
     # ---- 基础 ----
     def hwnd(self):
-        return int(self._w.native.Handle.ToInt32())
+        return int(self._w.native.Handle.ToInt64())
 
     def ui_invoke(self, fn):
         try:
