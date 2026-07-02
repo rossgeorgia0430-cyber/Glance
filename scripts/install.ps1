@@ -31,7 +31,10 @@ if (-not (Test-Administrator)) {
   if ($NoShortcut) { $relaunchArgs += ' -NoShortcut' }
   if ($NoAutostart) { $relaunchArgs += ' -NoAutostart' }
   if ($Quiet) { $relaunchArgs += ' -Quiet' }
-  $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $relaunchArgs -Wait -PassThru
+  # PS 5.1 的 -Wait 会等待整棵进程树（含所有后代进程）；提权脚本最后会拉起 Glance.exe，
+  # 若用 -Wait 外层脚本会一直挂到用户退出应用。改用 WaitForExit 只等提权进程本身。
+  $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $relaunchArgs -PassThru
+  $p.WaitForExit()
   exit $p.ExitCode
 }
 
@@ -160,4 +163,5 @@ if (-not $NoAutostart) {
 }
 
 Info '安装完成。'
-if (-not $Quiet) { Start-Process -FilePath $Exe }
+# 本脚本运行在提权环境，直接启动会让 Glance 以管理员权限运行；经 explorer 转发可回落到普通用户权限。
+if (-not $Quiet) { Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$Exe`"" }

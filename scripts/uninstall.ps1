@@ -20,7 +20,10 @@ function Test-Administrator {
 if (-not (Test-Administrator)) {
   Info '需要管理员权限移除索引服务，正在请求授权…'
   $relaunchArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-  $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $relaunchArgs -Wait -PassThru
+  # PS 5.1 的 -Wait 会等待整棵进程树（含所有后代进程）；提权脚本拉起子进程时外层会挂死，
+  # 改用 WaitForExit 只等提权进程本身，避免将来踩坑。
+  $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $relaunchArgs -PassThru
+  $p.WaitForExit()
   exit $p.ExitCode
 }
 
