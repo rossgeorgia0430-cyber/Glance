@@ -3,7 +3,7 @@
   - 安装到 %ProgramFiles%\Glance（索引服务以 LocalSystem 运行，程序目录必须防普通用户篡改）
   - 内置并安装 Glance 专属索引服务，不安装/启动桌面版 Everything
   - 创建开始菜单 + 桌面快捷方式
-  - 登录自启；开始菜单快捷方式同时提供 Ctrl+Alt+S 冷启动
+  - 登录自启；常驻进程提供 Ctrl+Alt+S 全局热键
 #>
 [CmdletBinding()]
 param([switch]$NoShortcut, [switch]$NoAutostart, [switch]$Quiet)
@@ -132,13 +132,14 @@ Set-Service -Name $ServiceName -DisplayName $ServiceDisplayName `
 if ($svc.Status -ne 'Running') { Start-Service -Name $ServiceName }
 Info '索引服务：已就绪（后台无界面）'
 
-# [6/7] 快捷方式；Start Menu 的 Hotkey 让 Glance 完全退出后也可冷启动
+# [6/7] 快捷方式。不要给 .lnk 设置 Hotkey：Shell 会优先占用该组合键，
+# 使常驻进程的 RegisterHotKey 失败；随后每次按键都会冷启动一个新进程再走
+# 单实例转发，既慢，也会错过呼出瞬间的 Explorer 前台窗口。
 if (-not $NoShortcut) {
   $wsh = New-Object -ComObject WScript.Shell
   $startDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
   $desktopDir = [Environment]::GetFolderPath('Desktop')
-  foreach ($entry in @(@($startDir, $true), @($desktopDir, $false))) {
-    $dir = $entry[0]
+  foreach ($dir in @($startDir, $desktopDir)) {
     if (-not (Test-Path -LiteralPath $dir)) { continue }
     $lnk = Join-Path $dir "$AppName.lnk"
     $sc = $wsh.CreateShortcut($lnk)
@@ -146,14 +147,15 @@ if (-not $NoShortcut) {
     $sc.WorkingDirectory = $Target
     $sc.IconLocation = "$Exe,0"
     $sc.Description = 'Glance —— 文件搜索'
-    if ($entry[1]) { $sc.Hotkey = 'CTRL+ALT+S' }
+    # 显式清空，修复旧安装留下的快捷键绑定。
+    $sc.Hotkey = ''
     $sc.Save()
   }
   [void][Runtime.InteropServices.Marshal]::ReleaseComObject($wsh)
-  Info '已创建快捷方式（Ctrl+Alt+S 支持冷启动）'
+  Info '已创建快捷方式（全局热键由常驻进程提供）'
 }
 
-# [7/7] 登录自启（隐藏常驻）；冷启动快捷键仍可在退出后重新拉起
+# [7/7] 登录自启（隐藏常驻）
 $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 if (-not $NoAutostart) {
   Set-ItemProperty -LiteralPath $RunKey -Name $AppName -Value "`"$Exe`" --tray" -Force

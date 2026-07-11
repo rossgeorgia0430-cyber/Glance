@@ -64,6 +64,8 @@ class App:
         self._stop_event = threading.Event()
         self._loaded_once = False
         self._summoned_early = False
+        self._summon_generation = 0
+        self._summon_lock = threading.Lock()
 
     # ================= Api(暴露给 JS) =================
     # ---- 搜索与动作 ----
@@ -182,6 +184,11 @@ class App:
         句柄(极快、无 COM),立刻显示窗口,范围一会儿再补上。
         """
         self._summoned_early = True
+        # Hotkey、托盘和单实例事件都可能从不同线程同时呼出。给每次呼出编号，
+        # 防止较慢的旧 Explorer COM 查询晚到后覆盖最新一次的搜索范围。
+        with self._summon_lock:
+            self._summon_generation += 1
+            generation = self._summon_generation
         hwnd = None
         try:
             from . import focus
@@ -192,10 +199,10 @@ class App:
             self._native.show_front()
         self._eval_js("window.__glanceShow && window.__glanceShow(%s)" % json.dumps(""))
         if hwnd:
-            threading.Thread(target=self._resolve_scope, args=(hwnd,),
+            threading.Thread(target=self._resolve_scope, args=(hwnd, generation),
                              daemon=True, name="GlanceScope").start()
 
-    def _resolve_scope(self, hwnd):
+    def _resolve_scope(self, hwnd, generation):
         """后台线程:COM 解析前台目录,完成后推送范围到前端。"""
         folder = ""
         try:
@@ -203,7 +210,9 @@ class App:
             folder = focus.explorer_folder_for(hwnd) or ""
         except Exception:
             folder = ""
-        if folder:
+        with self._summon_lock:
+            is_latest = generation == self._summon_generation
+        if folder and is_latest:
             self._eval_js("window.__glanceScope && window.__glanceScope(%s)" % json.dumps(folder))
 
     def _eval_js(self, code):
