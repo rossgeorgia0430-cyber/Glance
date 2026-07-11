@@ -180,19 +180,35 @@ function render(query) {
 }
 
 /* ---------- 搜索 ---------- */
-function doSearch() {
+async function doSearch(retryCount = 0) {
   const query = elQ.value;
   const myId = ++reqId;
   if (!query.trim()) { items = []; sel = -1; render(''); return; }
   if (!api) return;
-  api.search(query, currentScope).then((res) => {
+  try {
+    const res = await api.search(query, currentScope);
     if (myId !== reqId) return;
+    if (!res || typeof res.ok !== 'boolean' || !Array.isArray(res.results))
+      throw new Error('搜索桥接返回了无效结果');
     if (!res.ok) showBanner(res.error || '搜索出错'); else hideBanner();
     items = res.results || [];
     sel = items.length ? 0 : -1;
     render(query);
     scrollSelIntoView();
-  });
+  } catch (e) {
+    if (myId !== reqId) return;
+    if (retryCount < 1) {
+      showBanner('搜索连接短暂异常，正在重试…', 'info');
+      setTimeout(() => {
+        if (myId === reqId && elQ.value === query) doSearch(retryCount + 1);
+      }, 180);
+      return;
+    }
+    items = [];
+    sel = -1;
+    showBanner('搜索暂时不可用，请稍后重试');
+    render(query);
+  }
 }
 elQ.addEventListener('input', () => { clearTimeout(debounceTimer); debounceTimer = setTimeout(doSearch, 70); });
 

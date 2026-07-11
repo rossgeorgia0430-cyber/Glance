@@ -40,6 +40,10 @@ class EverythingError(RuntimeError):
     pass
 
 
+class EverythingDisconnectedError(EverythingError):
+    """查询过程中索引 IPC 断开，可在后端恢复后安全重试。"""
+
+
 def _dll_path():
     here = os.path.dirname(os.path.abspath(__file__))
     cands = [os.path.join(here, "GlanceIndex64.dll")]
@@ -327,7 +331,7 @@ def _run(d, search_str, scan, match_path):
     if not d.Everything_QueryW(True):
         err = d.Everything_GetLastError()
         if err == EVERYTHING_ERROR_IPC:
-            raise EverythingError("文件索引服务已断开，正在自动恢复。")
+            raise EverythingDisconnectedError("文件索引服务已断开，正在自动恢复。")
         raise EverythingError(f"文件索引查询失败 (错误码 {err})。")
 
     n = d.Everything_GetNumResults()
@@ -385,17 +389,26 @@ def search(query, limit=60, scan=800, scope_dir=None):
         scoped = bool(scope_dir)
         match_path = scoped or (len(tokens) > 1)
 
-        results = _run(d, _compose(tokens, scope_dir, fuzzy=False), scan, match_path)
+        # 索引服务可能恰好在查询期间重启。旧逻辑直接把这次失败返回前端，
+        # 之后也没有任何动作重放用户的查询，于是表现为偶发“按了但不搜索”。
+        # IPC 错误是可恢复的，只对它做一次就地恢复与整次查询重试。
+        for attempt in range(2):
+            try:
+                results = _run(d, _compose(tokens, scope_dir, fuzzy=False), scan, match_path)
 
-        # 子串命中过少 → 子序列回退(容错漏字),合并去重
-        if len(results) < _FUZZY_FALLBACK_THRESHOLD and all(_simple(t) for t in tokens):
-            more = _run(d, _compose(tokens, scope_dir, fuzzy=True), scan,
-                        match_path=True if scoped else False)
-            seen = {r["path"].lower() for r in results}
-            for r in more:
-                if r["path"].lower() not in seen:
-                    seen.add(r["path"].lower())
-                    results.append(r)
+                # 子串命中过少 → 子序列回退(容错漏字),合并去重
+                if len(results) < _FUZZY_FALLBACK_THRESHOLD and all(_simple(t) for t in tokens):
+                    more = _run(d, _compose(tokens, scope_dir, fuzzy=True), scan,
+                                match_path=True if scoped else False)
+                    seen = {r["path"].lower() for r in results}
+                    for r in more:
+                        if r["path"].lower() not in seen:
+                            seen.add(r["path"].lower())
+                            results.append(r)
+                break
+            except EverythingDisconnectedError:
+                if attempt or not ensure_running(timeout=3.0, poll=0.15):
+                    raise
 
         ql = query.lower()
         now = time.time()
