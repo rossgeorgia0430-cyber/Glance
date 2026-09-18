@@ -9,73 +9,22 @@
 param([switch]$NoShortcut, [switch]$NoAutostart, [switch]$Quiet)
 
 $ErrorActionPreference = 'Stop'
-$AppName = 'Glance'
+. (Join-Path $PSScriptRoot 'common.ps1')
 $ExeName = 'Glance.exe'
-$ServiceName = 'Everything (Glance)'
 $ServiceDisplayName = 'Glance Index Service'
-$Target = Join-Path $env:ProgramFiles $AppName
-$LegacyTarget = Join-Path $env:LOCALAPPDATA "Programs\$AppName"
-$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-
-function Info($m) { Write-Host "[Glance] $m" }
-
-function Test-Administrator {
-  $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-  $principal = New-Object Security.Principal.WindowsPrincipal($id)
-  return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
 
 if (-not (Test-Administrator)) {
   Info '需要管理员权限安装受保护的索引服务，正在请求授权…'
-  $relaunchArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-  if ($NoShortcut) { $relaunchArgs += ' -NoShortcut' }
-  if ($NoAutostart) { $relaunchArgs += ' -NoAutostart' }
-  if ($Quiet) { $relaunchArgs += ' -Quiet' }
-  # PS 5.1 的 -Wait 会等待整棵进程树（含所有后代进程）；提权脚本最后会拉起 Glance.exe，
-  # 若用 -Wait 外层脚本会一直挂到用户退出应用。改用 WaitForExit 只等提权进程本身。
-  $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $relaunchArgs -PassThru
-  $p.WaitForExit()
-  exit $p.ExitCode
-}
-
-function Remove-SafeTree([string]$Path, [string]$AllowedParent) {
-  if (-not (Test-Path -LiteralPath $Path)) { return }
-  $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-  $parent = [IO.Path]::GetFullPath($AllowedParent).TrimEnd('\')
-  if (-not $full.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase)) {
-    throw "拒绝删除预期目录之外的路径：$full"
-  }
-  # 进程退出后文件句柄可能延迟释放，短暂重试再放弃。
-  for ($i = 1; $i -le 10; $i++) {
-    try { Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop; return }
-    catch { if ($i -eq 10) { throw }; Start-Sleep -Milliseconds 300 }
-  }
-}
-
-function Stop-Indexer([string]$Base) {
-  foreach ($name in @('GlanceIndexer.exe', 'Everything.exe')) {
-    $indexer = Join-Path $Base "_internal\glance\bin\$name"
-    if (Test-Path -LiteralPath $indexer) {
-      try { & $indexer -instance Glance -quit | Out-Null } catch {}
-      try { & $indexer -instance Glance -uninstall-service | Out-Null } catch {}
-    }
-  }
-  # -quit 是异步 IPC，旧版还可能有残留进程占用安装目录。
-  # 仅按可执行文件路径强杀本安装目录内的进程，绝不误伤用户自己的 Everything。
-  if (Test-Path -LiteralPath $Base) {
-    $full = [IO.Path]::GetFullPath($Base).TrimEnd('\')
-    Get-Process -ErrorAction SilentlyContinue | Where-Object {
-      try { $_.Path -and $_.Path.StartsWith($full + '\', [StringComparison]::OrdinalIgnoreCase) }
-      catch { $false }
-    } | ForEach-Object {
-      try { $_.Kill(); $_.WaitForExit(3000) | Out-Null } catch {}
-    }
-  }
+  $extra = @()
+  if ($NoShortcut) { $extra += '-NoShortcut' }
+  if ($NoAutostart) { $extra += '-NoAutostart' }
+  if ($Quiet) { $extra += '-Quiet' }
+  Invoke-Elevated $PSCommandPath ($extra -join ' ')
 }
 
 # [1/7] 定位安装载荷
 $Payload = $null
-foreach ($c in @((Join-Path $Root $AppName), (Join-Path $Root "payload\$AppName"), (Join-Path $Root "..\dist\$AppName"))) {
+foreach ($c in @((Join-Path $PSScriptRoot $AppName), (Join-Path $PSScriptRoot "payload\$AppName"), (Join-Path $PSScriptRoot "..\dist\$AppName"))) {
   if (Test-Path (Join-Path $c $ExeName)) { $Payload = (Resolve-Path $c).Path; break }
 }
 if (-not $Payload) { throw "找不到程序载荷($ExeName)。请在解压后的目录运行本脚本。" }
@@ -83,15 +32,8 @@ Info "载荷：$Payload"
 
 # [2/7] 停旧版本和旧索引服务
 Info '停止旧版本…'
-Get-Process $AppName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Stop-Indexer $Target
-Stop-Indexer $LegacyTarget
-try {
-  $svc = Get-Service -Name $ServiceName -ErrorAction Stop
-  if ($svc.Status -ne 'Stopped') { Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue }
-  & sc.exe delete $ServiceName | Out-Null
-  Start-Sleep -Milliseconds 500
-} catch {}
+Stop-GlanceAll
+Start-Sleep -Milliseconds 500  # sc delete 是异步的，给服务控制管理器留点时间释放旧服务再重装
 
 # [3/7] 复制到受保护目录，同时迁移旧的每用户安装
 Info "安装到：$Target"
@@ -147,7 +89,7 @@ if (-not $NoShortcut) {
     $sc.WorkingDirectory = $Target
     $sc.IconLocation = "$Exe,0"
     $sc.Description = 'Glance —— 文件搜索'
-    # 显式清空，修复旧安装留下的快捷键绑定。
+    # 覆盖同名快捷方式时会保留原有热键，必须显式清空（原因见上）。
     $sc.Hotkey = ''
     $sc.Save()
   }

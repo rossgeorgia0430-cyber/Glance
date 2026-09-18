@@ -12,7 +12,10 @@ Win32 原生窗口行为 —— 给 frameless pywebview 窗口加回全部 Win10
 所有 Win32 调用经 window.native.BeginInvoke 投到 UI 线程(SendMessage 模态循环会卡事件循环)。
 """
 import ctypes
+import logging
 from ctypes import wintypes
+
+log = logging.getLogger(__name__)
 
 _user32 = ctypes.windll.user32
 _kernel32 = ctypes.windll.kernel32
@@ -32,6 +35,7 @@ _SWP_NOZORDER = 0x0004
 _SWP_NOACTIVATE = 0x0010
 _SWP_FRAMECHANGED = 0x0020
 _SW_RESTORE = 9
+_MIN_FIT_HEIGHT = 80
 
 _RESIZE_HT = {
     'left': 10, 'right': 11, 'top': 12, 'topleft': 13, 'topright': 14,
@@ -76,20 +80,30 @@ _user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 _user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
 _user32.AttachThreadInput.restype = wintypes.BOOL
 _kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+_dwmapi.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+_dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+_user32.GetDpiForWindow.argtypes = [wintypes.HWND]
+_user32.GetDpiForWindow.restype = wintypes.UINT
+_USER_DEFAULT_DPI = 96
 _WNDPROC_REFS = []  # 防回调被 GC
+
+
+def _window_size(hwnd):
+    rect = wintypes.RECT()
+    _user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    return rect.right - rect.left, rect.bottom - rect.top
+
+
+def _resize(hwnd, w, h):
+    _user32.SetWindowPos(hwnd, 0, 0, 0, w, h, _SWP_NOMOVE | _SWP_NOZORDER | _SWP_NOACTIVATE)
 
 
 def _center(hwnd):
     """主屏水平居中、靠上(物理像素,规避高 DPI 错位)。"""
-    try:
-        rect = wintypes.RECT()
-        _user32.GetWindowRect(hwnd, ctypes.byref(rect))
-        w, h = rect.right - rect.left, rect.bottom - rect.top
-        sw, sh = _user32.GetSystemMetrics(0), _user32.GetSystemMetrics(1)
-        _user32.SetWindowPos(hwnd, 0, max(0, (sw - w) // 2), max(0, int(sh * 0.16)),
-                             0, 0, _SWP_NOSIZE | _SWP_NOZORDER)
-    except Exception:
-        pass
+    w, _ = _window_size(hwnd)
+    sw, sh = _user32.GetSystemMetrics(0), _user32.GetSystemMetrics(1)
+    _user32.SetWindowPos(hwnd, 0, max(0, (sw - w) // 2), max(0, int(sh * 0.16)),
+                         0, 0, _SWP_NOSIZE | _SWP_NOZORDER)
 
 
 def _apply_style(hwnd, style):
@@ -115,13 +129,8 @@ def _install_native_chrome(hwnd):
 
 
 def _dwm_set(hwnd, attr, value):
-    try:
-        f = _dwmapi.DwmSetWindowAttribute
-        f.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
-        f.restype = ctypes.c_long
-        f(hwnd, attr, ctypes.byref(value), ctypes.sizeof(value))
-    except Exception:
-        pass
+    # 旧系统不支持的属性只返回错误 HRESULT;少了圆角/暗色边框不影响功能,不必处理
+    _dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(value), ctypes.sizeof(value))
 
 
 def set_frame_visual(hwnd, maximized):
@@ -170,39 +179,43 @@ class NativeWindow:
         return int(self._w.native.Handle.ToInt64())
 
     def ui_invoke(self, fn):
-        try:
-            from System import Action
-            self._w.native.BeginInvoke(Action(fn))
-        except Exception:
+        """把 fn 投到 UI 线程异步执行。
+
+        异常若穿回 .NET 消息循环会变成 WinForms 未处理异常,所以在这一处统一记录。
+        """
+        from System import Action
+
+        def guarded():
             try:
                 fn()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001
+                log.exception("UI 线程操作失败")
+
+        self._w.native.BeginInvoke(Action(guarded))
 
     def install(self):
         """窗口显示后一次性装原生 chrome。"""
         def fn():
             if not self._installed:
-                _install_native_chrome(self.hwnd())
+                hwnd = self.hwnd()
+                _install_native_chrome(hwnd)
+                # pywebview 先按带边框样式设尺寸再去边框,WinForms 保持客户区不变,窗口就窄了
+                # 一圈边框;不恢复的话,记住的宽度每次启动都会缩一截。
+                scale = _user32.GetDpiForWindow(hwnd) / _USER_DEFAULT_DPI
+                _resize(hwnd, round(self._w.initial_width * scale), _window_size(hwnd)[1])
                 self._installed = True
             self.apply_maximized_bounds()
         self.ui_invoke(fn)
 
     def apply_maximized_bounds(self):
-        try:
-            from System.Windows.Forms import Screen
-            from System.Drawing import Rectangle
-            form = self._w.native
-            wa = Screen.FromControl(form).WorkingArea
-            form.MaximizedBounds = Rectangle(wa.X, wa.Y, wa.Width, wa.Height)
-        except Exception:
-            pass
+        from System.Windows.Forms import Screen
+        from System.Drawing import Rectangle
+        form = self._w.native
+        wa = Screen.FromControl(form).WorkingArea
+        form.MaximizedBounds = Rectangle(wa.X, wa.Y, wa.Width, wa.Height)
 
     def is_maximized(self):
-        try:
-            return bool(_user32.IsZoomed(self.hwnd()))
-        except Exception:
-            return False
+        return bool(_user32.IsZoomed(self.hwnd()))
 
     # ---- 拖动 / 缩放 / 最大化 / 最小化 ----
     def native_drag(self):
@@ -228,75 +241,48 @@ class NativeWindow:
 
     def toggle_maximize(self):
         def fn():
-            try:
-                from System.Windows.Forms import FormWindowState
-                from System.Drawing import Size
-                form = self._w.native
-                if form.WindowState == FormWindowState.Maximized:
-                    form.WindowState = FormWindowState.Normal
-                    if self._normal_size:
-                        form.Size = Size(*self._normal_size)
-                else:
-                    self._normal_size = (form.Width, form.Height)
-                    self.apply_maximized_bounds()
-                    form.WindowState = FormWindowState.Maximized
-                set_frame_visual(self.hwnd(), self.is_maximized())
-            except Exception:
-                pass
+            from System.Windows.Forms import FormWindowState
+            from System.Drawing import Size
+            form = self._w.native
+            if form.WindowState == FormWindowState.Maximized:
+                form.WindowState = FormWindowState.Normal
+                if self._normal_size:
+                    form.Size = Size(*self._normal_size)
+            else:
+                self._normal_size = (form.Width, form.Height)
+                self.apply_maximized_bounds()
+                form.WindowState = FormWindowState.Maximized
+            set_frame_visual(self.hwnd(), self.is_maximized())
 
         self.ui_invoke(fn)
 
     def set_height(self, h_physical):
         """按内容自适应窗口高度(物理像素,左上角锚定向下生长)。最大化时忽略。"""
-        try:
-            h = int(h_physical)
-        except Exception:
-            return
-        if h < 80:
-            h = 80
+        h = max(_MIN_FIT_HEIGHT, int(h_physical))
         if self.is_maximized():
             return
 
         def fn():
-            try:
-                hwnd = self.hwnd()
-                rect = wintypes.RECT()
-                _user32.GetWindowRect(hwnd, ctypes.byref(rect))
-                w = rect.right - rect.left
-                hh = min(h, _user32.GetSystemMetrics(1))  # 不超过屏幕高
-                if hh == rect.bottom - rect.top:
-                    return  # 高度未变,免触发多余 resize
-                _user32.SetWindowPos(hwnd, 0, 0, 0, w, hh,
-                                     _SWP_NOMOVE | _SWP_NOZORDER | _SWP_NOACTIVATE)
-            except Exception:
-                pass
+            hwnd = self.hwnd()
+            w, cur_h = _window_size(hwnd)
+            hh = min(h, _user32.GetSystemMetrics(1))  # 不超过屏幕高
+            if hh != cur_h:  # 高度未变就不动,免触发多余 resize
+                _resize(hwnd, w, hh)
 
         self.ui_invoke(fn)
 
     def minimize(self):
-        try:
-            self._w.minimize()
-        except Exception:
-            pass
+        self._w.minimize()
 
     # ---- 常驻显示 / 隐藏 ----
     def hide(self):
-        try:
-            self.ui_invoke(lambda: self._w.hide())
-        except Exception:
-            pass
+        self.ui_invoke(self._w.hide)
 
     def show_front(self):
         def fn():
-            try:
-                self._w.show()
-            except Exception:
-                pass
-            try:
-                hwnd = self.hwnd()
-                if not self.is_maximized():
-                    _center(hwnd)
-                _restore_and_foreground(hwnd)
-            except Exception:
-                pass
+            self._w.show()
+            hwnd = self.hwnd()
+            if not self.is_maximized():
+                _center(hwnd)
+            _restore_and_foreground(hwnd)
         self.ui_invoke(fn)

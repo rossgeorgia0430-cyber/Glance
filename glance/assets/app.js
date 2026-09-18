@@ -190,6 +190,8 @@ async function doSearch(retryCount = 0) {
     if (myId !== reqId) return;
     if (!res || typeof res.ok !== 'boolean' || !Array.isArray(res.results))
       throw new Error('搜索桥接返回了无效结果');
+    // 后端按到达顺序让旧查询让位;两次调用几乎同时到达时最新一次也可能被判为过期,重发即可
+    if (res.stale) { doSearch(); return; }
     if (!res.ok) showBanner(res.error || '搜索出错'); else hideBanner();
     items = res.results || [];
     sel = items.length ? 0 : -1;
@@ -227,9 +229,9 @@ function setScope(path) {
 }
 $('#scopeClear').addEventListener('click', () => { setScope(''); elQ.focus(); });
 
-/* 呼出钩子:Python 端 evaluate_js 调用 */
-window.__glanceShow = function (scope) {
-  setScope(scope || '');
+/* 呼出钩子:Python 端 evaluate_js 调用;范围先清空,目录解析完成后由 __glanceScope 补上 */
+window.__glanceShow = function () {
+  setScope('');
   elQ.focus();
   elQ.select();
   syncMaximized();
@@ -249,13 +251,19 @@ function setSel(i) {
   scrollSelIntoView();
 }
 function scrollSelIntoView() { const r = elResults.children[sel]; if (r) r.scrollIntoView({ block: 'nearest' }); }
+const ACTIONS = {
+  open:     { call: (p) => api.open_file(p),        done: () => api.win_close() },
+  reveal:   { call: (p) => api.reveal_in_folder(p), done: () => api.win_close() },
+  copy:     { call: (p) => api.copy_path(p),        done: () => toast('已复制路径') },
+  copyname: { call: (p) => api.copy_name(p),        done: () => toast('已复制文件名') },
+};
 function act(kind, i) {
   const it = items[i];
-  if (!it || !api) return;
-  if (kind === 'open') api.open_file(it.path).then((r) => { if (r && r.ok && api.win_close) api.win_close(); });
-  else if (kind === 'reveal') api.reveal_in_folder(it.path).then((r) => { if (r && r.ok && api.win_close) api.win_close(); });
-  else if (kind === 'copy') api.copy_path(it.path).then((r) => { if (r && r.ok) toast('已复制路径'); });
-  else if (kind === 'copyname') api.copy_name(it.path).then((r) => { if (r && r.ok) toast('已复制文件名'); });
+  const action = ACTIONS[kind];
+  if (!it || !action || !api) return;
+  action.call(it.path).then(
+    (r) => { if (r && r.ok) action.done(); else showBanner((r && r.error) || '操作失败'); },
+    () => showBanner('操作失败'));
 }
 elResults.addEventListener('click', (e) => {
   const row = e.target.closest('.row'); if (!row) return;
@@ -280,8 +288,9 @@ document.addEventListener('keydown', (e) => {
   }
   else if (e.key === 'Escape') {
     e.preventDefault();
-    if (elQ.value) { elQ.value = ''; items = []; sel = -1; render(''); }
-    else if (api && api.win_close) api.win_close();   // 隐藏到托盘
+    // 清空走 doSearch:它会作废仍在路上的查询,免得旧结果晚到后又被渲染出来
+    if (elQ.value) { elQ.value = ''; doSearch(); }
+    else if (api) api.win_close();   // 隐藏到托盘
   }
 });
 
@@ -323,8 +332,11 @@ $('#winClose').addEventListener('click', () => api && api.win_close());
 $('#themeBtn').addEventListener('click', toggleTheme);
 
 function syncMaximized() {
-  if (!api || !api.win_is_maximized) return;
-  api.win_is_maximized().then((m) => document.documentElement.classList.toggle('window-maximized', !!m));
+  if (!api) return Promise.resolve(false);
+  return api.win_is_maximized().then((m) => {
+    document.documentElement.classList.toggle('window-maximized', !!m);
+    return !!m;
+  });
 }
 
 /* ---------- 自适应高度(空时仅搜索栏,随结果增高到上限后滚动) ---------- */
@@ -349,22 +361,21 @@ function scheduleFit() {
   fitRaf = requestAnimationFrame(fitHeight);
 }
 function afterMaxToggle() {
-  if (!api || !api.win_is_maximized) { scheduleFit(); return; }
-  api.win_is_maximized().then((m) => {
-    document.documentElement.classList.toggle('window-maximized', !!m);
-    if (!m) scheduleFit();   // 还原后重新贴合内容;最大化时保持铺满
-  });
+  syncMaximized().then((m) => { if (!m) scheduleFit(); });   // 还原后重新贴合内容;最大化时保持铺满
 }
-let sizeTimer = null;
+/* 拖动缩放时 resize 每帧触发,每次搜索后的自适应高度也会触发;合并到停下后再跨进程同步,
+   且只在宽度真正变化时写设置文件。宽度按 CSS 像素存:与建窗口时 pywebview 用的逻辑像素一致 */
+let resizeTimer = null;
+let savedWidth = 0;
 window.addEventListener('resize', () => {
-  syncMaximized();
-  clearTimeout(sizeTimer);
-  sizeTimer = setTimeout(() => {
-    if (api && api.save_size && !document.documentElement.classList.contains('window-maximized')) {
-      const dpr = window.devicePixelRatio || 1;
-      api.save_size(Math.round(window.innerWidth * dpr), Math.round(window.innerHeight * dpr));
-    }
-  }, 500);
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    syncMaximized().then((m) => {
+      if (m) return;
+      const w = Math.round(window.innerWidth);
+      if (w !== savedWidth) { savedWidth = w; api.save_size(w); }
+    });
+  }, 150);
 });
 
 /* ---------- 提示 ---------- */
@@ -377,5 +388,10 @@ function showBanner(msg, kind) {
   elBanner.textContent = msg;
   elBanner.classList.toggle('info', kind === 'info');
   elBanner.classList.remove('hidden');
+  scheduleFit();
 }
-function hideBanner() { elBanner.classList.add('hidden'); }
+function hideBanner() {
+  if (elBanner.classList.contains('hidden')) return;
+  elBanner.classList.add('hidden');
+  scheduleFit();
+}

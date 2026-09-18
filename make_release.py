@@ -10,7 +10,7 @@ DIST = os.path.join(HERE, "dist", "Glance")
 REL = os.path.join(HERE, "release")
 OUT = os.path.join(REL, "Glance-Setup")
 ZIP = os.path.join(REL, "Glance-Setup.zip")
-SCRIPTS = ["install.ps1", "uninstall.ps1", "Install-Glance.bat", "Uninstall-Glance.bat"]
+SCRIPTS = ["common.ps1", "install.ps1", "uninstall.ps1", "Install-Glance.bat", "Uninstall-Glance.bat"]
 
 README = """Glance —— 极简全局文件搜索
 
@@ -20,7 +20,8 @@ README = """Glance —— 极简全局文件搜索
   安装 Glance 专属索引服务,并设置登录自启(后台常驻托盘)。
 
 使用:
-  全局热键 Ctrl+Alt+S 随时呼出;即使从托盘完全退出,该热键也会冷启动 Glance。
+  全局热键 Ctrl+Alt+S 随时呼出;从托盘"退出"后热键随进程释放,
+  可从开始菜单或桌面快捷方式重新启动。
   在资源管理器中呼出会自动限定到当前目录。
   ↑↓ 选择 · Enter 打开 · Ctrl+Enter 定位 · Ctrl+C 复制路径 · Esc 隐藏。
 

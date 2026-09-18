@@ -3,71 +3,15 @@
 param()
 
 $ErrorActionPreference = 'Stop'
-$AppName = 'Glance'
-$ServiceName = 'Everything (Glance)'
-$Target = Join-Path $env:ProgramFiles $AppName
-$LegacyTarget = Join-Path $env:LOCALAPPDATA "Programs\$AppName"
+. (Join-Path $PSScriptRoot 'common.ps1')
 $IndexData = Join-Path $env:LOCALAPPDATA 'Glance\Indexer'
-
-function Info($m) { Write-Host "[Glance] $m" }
-
-function Test-Administrator {
-  $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-  $principal = New-Object Security.Principal.WindowsPrincipal($id)
-  return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
 
 if (-not (Test-Administrator)) {
   Info '需要管理员权限移除索引服务，正在请求授权…'
-  $relaunchArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-  # PS 5.1 的 -Wait 会等待整棵进程树（含所有后代进程）；提权脚本拉起子进程时外层会挂死，
-  # 改用 WaitForExit 只等提权进程本身，避免将来踩坑。
-  $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $relaunchArgs -PassThru
-  $p.WaitForExit()
-  exit $p.ExitCode
+  Invoke-Elevated $PSCommandPath ''
 }
 
-function Remove-SafeTree([string]$Path, [string]$AllowedParent) {
-  if (-not (Test-Path -LiteralPath $Path)) { return }
-  $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-  $parent = [IO.Path]::GetFullPath($AllowedParent).TrimEnd('\')
-  if (-not $full.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase)) {
-    throw "拒绝删除预期目录之外的路径：$full"
-  }
-  # 进程退出后文件句柄可能延迟释放，短暂重试再放弃。
-  for ($i = 1; $i -le 10; $i++) {
-    try { Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop; return }
-    catch { if ($i -eq 10) { throw }; Start-Sleep -Milliseconds 300 }
-  }
-}
-
-Get-Process $AppName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-
-foreach ($base in @($Target, $LegacyTarget)) {
-  foreach ($name in @('GlanceIndexer.exe', 'Everything.exe')) {
-    $indexer = Join-Path $base "_internal\glance\bin\$name"
-    if (Test-Path -LiteralPath $indexer) {
-      try { & $indexer -instance Glance -quit | Out-Null } catch {}
-      try { & $indexer -instance Glance -uninstall-service | Out-Null } catch {}
-    }
-  }
-  # -quit 是异步 IPC，仅按路径强杀本安装目录内的残留进程，绝不误伤用户自己的 Everything。
-  if (Test-Path -LiteralPath $base) {
-    $full = [IO.Path]::GetFullPath($base).TrimEnd('\')
-    Get-Process -ErrorAction SilentlyContinue | Where-Object {
-      try { $_.Path -and $_.Path.StartsWith($full + '\', [StringComparison]::OrdinalIgnoreCase) }
-      catch { $false }
-    } | ForEach-Object {
-      try { $_.Kill(); $_.WaitForExit(3000) | Out-Null } catch {}
-    }
-  }
-}
-
-try {
-  $svc = Get-Service -Name $ServiceName -ErrorAction Stop
-  if ($svc.Status -ne 'Stopped') { Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue }
-  & sc.exe delete $ServiceName | Out-Null
-} catch {}
+Stop-GlanceAll
 Info '已移除 Glance 索引服务'
 
 Remove-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' `

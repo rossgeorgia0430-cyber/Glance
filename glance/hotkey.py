@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
-"""全局热键(默认 Ctrl+Alt+S)—— 独立线程跑 RegisterHotKey + 消息循环。"""
+"""全局热键 Ctrl+Alt+S —— 独立线程跑 RegisterHotKey + 消息循环(WM_HOTKEY 只投给注册线程)。"""
 import ctypes
+import logging
 import threading
 from ctypes import wintypes
 
-_user32 = ctypes.windll.user32
+log = logging.getLogger(__name__)
+
+_user32 = ctypes.WinDLL("user32", use_last_error=True)
 _kernel32 = ctypes.windll.kernel32
 
 _MOD_ALT = 0x0001
@@ -22,41 +25,37 @@ _user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT, ctypes.c_s
 
 
 class HotkeyThread(threading.Thread):
-    def __init__(self, callback, mods=_MOD_CONTROL | _MOD_ALT, vk=_VK_S):
+    def __init__(self, callback):
         super().__init__(daemon=True, name="GlanceHotkey")
         self._callback = callback
-        self._mods = mods | _MOD_NOREPEAT
-        self._vk = vk
         self._tid = None
-        self.registered = False
-        self.ready = threading.Event()
+        self._registered = False
+        self._ready = threading.Event()
 
     def run(self):
         self._tid = _kernel32.GetCurrentThreadId()
-        if not _user32.RegisterHotKey(None, _HOTKEY_ID, self._mods, self._vk):
-            self.registered = False
-            self.ready.set()
+        self._registered = bool(_user32.RegisterHotKey(
+            None, _HOTKEY_ID, _MOD_CONTROL | _MOD_ALT | _MOD_NOREPEAT, _VK_S))
+        error = ctypes.get_last_error()
+        self._ready.set()
+        if not self._registered:
+            log.warning("注册全局热键失败 (错误码 %d)", error)
             return
-        self.registered = True
-        self.ready.set()
         msg = wintypes.MSG()
-        while True:
-            ret = _user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
-            if ret in (0, -1):
-                break
+        while _user32.GetMessageW(ctypes.byref(msg), None, 0, 0) not in (0, -1):
             if msg.message == _WM_HOTKEY and msg.wParam == _HOTKEY_ID:
                 try:
                     self._callback()
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001  一次呼出失败不能让消息循环退出、热键失效
+                    log.exception("热键呼出失败")
         _user32.UnregisterHotKey(None, _HOTKEY_ID)
 
-    def wait_registered(self, timeout=None):
-        self.ready.wait(timeout)
-        return self.registered
+    def wait_registered(self, timeout):
+        self._ready.wait(timeout)
+        return self._registered
 
     def stop(self):
         if self._tid is None:
             return
-        self.ready.wait(1.0)
+        self._ready.wait(1.0)
         _user32.PostThreadMessageW(self._tid, _WM_QUIT, 0, 0)

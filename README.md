@@ -64,8 +64,10 @@ glance/
   frecency.py    打开历史加权排序（最近/常用文件靠前）
   hotkey.py      全局热键注册与消息循环
   tray.py        系统托盘图标与菜单
-  settings.py    用户偏好持久化（%LOCALAPPDATA%\Glance\settings.json）
+  settings.py    用户数据目录与偏好持久化（%LOCALAPPDATA%\Glance\settings.json）
 ```
+
+运行中的警告和错误写入 `%LOCALAPPDATA%\Glance\glance.log`（打包版没有控制台，排查问题先看这里）。
 
 ## 已知限制
 
