@@ -1,3 +1,6 @@
+import os
+import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -82,13 +85,49 @@ class SupersededTests(unittest.TestCase):
 
 class LaunchTests(unittest.TestCase):
     def test_index_database_is_kept_next_to_private_config(self):
-        cfg = Path("C:/Users/u/AppData/Local/Glance/Indexer/Everything.ini")
-        with mock.patch.object(everything, "_ensure_config", return_value=cfg), \
+        index_dir = Path("C:/Users/u/AppData/Local/Glance/Indexer")
+        cfg = index_dir / "Everything.ini"
+        with mock.patch.object(everything, "_index_dir", return_value=index_dir), \
+                mock.patch.object(everything, "_ensure_config", return_value=cfg), \
                 mock.patch.object(everything.subprocess, "Popen") as popen:
             everything._launch()
 
         args = popen.call_args.args[0]
         self.assertEqual(str(cfg.with_name("Everything.db")), args[args.index("-db") + 1])
+
+
+class SaveDbTests(unittest.TestCase):
+    def _save(self, db_path, clock):
+        dll = mock.Mock()
+        dll.Everything_SaveDB.return_value = True
+        with mock.patch.object(everything, "_db_path", return_value=db_path), \
+                mock.patch.object(everything, "_load", return_value=dll), \
+                mock.patch.object(everything.time, "monotonic", return_value=clock):
+            everything.save_db_if_due()
+        return dll.Everything_SaveDB.call_count
+
+    def setUp(self):
+        patcher = mock.patch.object(everything, "_next_db_save", 0.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.db = Path(tmp.name) / "Everything.db"
+
+    def test_missing_database_is_saved_once_per_interval(self):
+        self.assertEqual(1, self._save(self.db, clock=100.0))
+        self.assertEqual(0, self._save(self.db, clock=101.0))
+        self.assertEqual(1, self._save(self.db, clock=100.0 + everything._DB_SAVE_INTERVAL))
+
+    def test_recently_saved_database_waits_for_remaining_interval(self):
+        self.db.write_bytes(b"")
+        age = 600.0
+        mtime = time.time() - age
+        os.utime(self.db, (mtime, mtime))
+
+        self.assertEqual(0, self._save(self.db, clock=100.0))
+        self.assertAlmostEqual(100.0 + everything._DB_SAVE_INTERVAL - age,
+                               everything._next_db_save, delta=5.0)
 
 
 class ForcedConfigTests(unittest.TestCase):

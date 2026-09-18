@@ -53,12 +53,16 @@ _DWMWA_COLOR_NONE = 0xFFFFFFFE
 # 64 位用 *Ptr 变体,避免 WS 样式(含 0x80000000)有符号溢出
 if ctypes.sizeof(ctypes.c_void_p) == 8:
     _GetWL, _SetWL = _user32.GetWindowLongPtrW, _user32.SetWindowLongPtrW
-    _GetWL.argtypes = [wintypes.HWND, ctypes.c_int]; _GetWL.restype = ctypes.c_ssize_t
-    _SetWL.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]; _SetWL.restype = ctypes.c_ssize_t
+    _GetWL.argtypes = [wintypes.HWND, ctypes.c_int]
+    _GetWL.restype = ctypes.c_ssize_t
+    _SetWL.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    _SetWL.restype = ctypes.c_ssize_t
 else:
     _GetWL, _SetWL = _user32.GetWindowLongW, _user32.SetWindowLongW
-    _GetWL.argtypes = [wintypes.HWND, ctypes.c_int]; _GetWL.restype = wintypes.LONG
-    _SetWL.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.LONG]; _SetWL.restype = wintypes.LONG
+    _GetWL.argtypes = [wintypes.HWND, ctypes.c_int]
+    _GetWL.restype = wintypes.LONG
+    _SetWL.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.LONG]
+    _SetWL.restype = wintypes.LONG
 
 _WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
                               ctypes.c_size_t, ctypes.c_ssize_t)
@@ -67,6 +71,7 @@ _user32.CallWindowProcW.argtypes = [ctypes.c_ssize_t, wintypes.HWND, wintypes.UI
                                     ctypes.c_size_t, ctypes.c_ssize_t]
 _user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t]
 _user32.IsZoomed.argtypes = [wintypes.HWND]
+_user32.IsWindowVisible.argtypes = [wintypes.HWND]
 _user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 # 64 位下句柄/线程相关调用必须设 restype/argtypes,避免指针截断
 _user32.GetForegroundWindow.restype = wintypes.HWND
@@ -216,6 +221,9 @@ class NativeWindow:
 
     def is_maximized(self):
         return bool(_user32.IsZoomed(self.hwnd()))
+
+    def is_visible(self):
+        return bool(_user32.IsWindowVisible(self.hwnd()))
 
     # ---- 拖动 / 缩放 / 最大化 / 最小化 ----
     def native_drag(self):

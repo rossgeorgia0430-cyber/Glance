@@ -14,6 +14,8 @@ log = logging.getLogger(__name__)
 
 # 资源管理器文件夹窗口的类名
 _EXPLORER_CLASSES = ("CabinetWClass", "ExploreWClass")
+# 每个标签页一个的子窗口;Win11 多标签时所有标签共用顶层 HWND,只能靠它区分
+_TAB_CLASS = "ShellTabWindowClass"
 
 
 def foreground_explorer_hwnd():
@@ -28,8 +30,17 @@ def foreground_explorer_hwnd():
     return hwnd if class_name in _EXPLORER_CLASSES else None
 
 
+def _tab_window(shell_window):
+    """Shell.Application 窗口项所在标签页的 ShellTabWindowClass 句柄。"""
+    import pythoncom
+    from win32com.shell import shell
+    browser = shell_window._oleobj_.QueryInterface(pythoncom.IID_IServiceProvider).QueryService(
+        shell.SID_STopLevelBrowser, shell.IID_IShellBrowser)
+    return browser.GetWindow()
+
+
 def explorer_folder_for(hwnd):
-    """用 Shell COM 解析某资源管理器窗口的当前目录;失败返回 None。
+    """用 Shell COM 解析某资源管理器窗口当前标签页的目录;失败返回 None。
 
     用 dynamic.Dispatch(纯后期绑定),不走 win32com 的 gen_py 缓存:打包后该缓存
     通常无法生成或持久化,client.Dispatch 会每次都极慢甚至抛错。
@@ -39,9 +50,11 @@ def explorer_folder_for(hwnd):
     from win32com.client import dynamic
     pythoncom.CoInitialize()
     try:
+        # 当前标签的标签窗口在同级子窗口里 z 序最前
+        active_tab = win32gui.FindWindowEx(hwnd, 0, _TAB_CLASS, None)
         for w in dynamic.Dispatch("Shell.Application").Windows():
             try:
-                if int(w.HWND) != int(hwnd):
+                if int(w.HWND) != int(hwnd) or _tab_window(w) != active_tab:
                     continue
                 path = w.Document.Folder.Self.Path
             except (pywintypes.com_error, AttributeError):

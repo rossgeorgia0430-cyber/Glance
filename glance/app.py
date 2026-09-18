@@ -248,11 +248,14 @@ class App:
                 self.summon()
 
     def _backend_supervisor(self):
-        """持续守护内置索引:被结束后自动拉起,状态变化时通知前端。"""
+        """持续守护内置索引:被结束后自动拉起,状态变化时通知前端,窗口隐藏时定期落盘。"""
         previous = None
         while not self._stop_event.is_set():
             try:
                 ready = everything.ensure_running(timeout=10.0)
+                # 落盘会让查询阻塞数秒,只在窗口隐藏时做;页面加载前原生窗口可能还没创建
+                if ready and self._loaded_once and not self._native.is_visible():
+                    everything.save_db_if_due()
             except Exception:  # noqa: BLE001  守护循环一旦退出,索引被结束后就再也不会拉起
                 log.exception("守护索引进程出错")
                 ready = False

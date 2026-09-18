@@ -38,6 +38,7 @@ _DETACHED_PROCESS = 0x00000008
 _BUF_SIZE = 32768
 _SCAN_LIMIT = 800                # 每次向索引取的候选数,再在本地重排取前 limit 条
 _FUZZY_FALLBACK_THRESHOLD = 25   # 子串命中少于此值才启用子序列回退
+_DB_SAVE_INTERVAL = 3600.0       # 索引库落盘超过此秒数就在空闲时再存一次
 
 # 每次冷启动前强制写回:专属实例必须无窗口、无托盘、开 IPC、不以管理员运行。
 # 限定目录搜索依赖 match_path_when_search_contains_path_separator:
@@ -99,6 +100,7 @@ def _load():
     d.Everything_GetLastError.restype = wintypes.DWORD
     d.Everything_GetMajorVersion.restype = wintypes.DWORD
     d.Everything_IsDBLoaded.restype = wintypes.BOOL
+    d.Everything_SaveDB.restype = wintypes.BOOL
     _dll = d
     return _dll
 
@@ -127,6 +129,10 @@ def _index_dir():
     folder = settings.data_dir() / "Indexer"
     folder.mkdir(exist_ok=True)
     return folder
+
+
+def _db_path():
+    return _index_dir() / "Everything.db"
 
 
 def _ini_quote(value):
@@ -219,10 +225,9 @@ def _launch():
         cfg = _ensure_config()
         # 必须显式指定索引库:默认写在 exe 旁(Program Files,普通用户无写权限),
         # 退出时存不下,每次启动都要全量重建(千万级文件需数分钟);存下后数秒即可就绪。
-        db = cfg.with_name("Everything.db")
         subprocess.Popen(
-            [_INDEXER_EXE, "-instance", _INSTANCE_NAME, "-config", str(cfg), "-db", str(db),
-             "-startup"],
+            [_INDEXER_EXE, "-instance", _INSTANCE_NAME, "-config", str(cfg),
+             "-db", str(_db_path()), "-startup"],
             cwd=str(cfg.parent),
             creationflags=_DETACHED_PROCESS | _CREATE_NO_WINDOW,
             close_fds=True,
@@ -262,6 +267,34 @@ def shutdown():
         )
     except (OSError, subprocess.TimeoutExpired):
         log.warning("退出索引进程失败", exc_info=True)
+
+
+_next_db_save = 0.0  # time.monotonic() 时刻
+
+
+def save_db_if_due():
+    """索引库上次落盘超过 _DB_SAVE_INTERVAL 就让索引进程保存一次。
+
+    Everything 只在正常退出时存库;索引进程崩溃或被强杀后,库若比 NTFS 变更日志
+    能回放的范围还旧,就得整卷重扫。落盘期间索引进程会阻塞数秒,调用方应在空闲时调。
+    """
+    global _next_db_save
+    now = time.monotonic()
+    if now < _next_db_save:
+        return
+    try:
+        age = time.time() - _db_path().stat().st_mtime
+    except FileNotFoundError:
+        age = _DB_SAVE_INTERVAL
+    if age < _DB_SAVE_INTERVAL:
+        _next_db_save = now + _DB_SAVE_INTERVAL - age
+        return
+    # 失败也等满一个周期再试:每次尝试都会让索引进程阻塞数秒
+    _next_db_save = now + _DB_SAVE_INTERVAL
+    with _query_lock:
+        d = _load()
+        if not d.Everything_SaveDB():
+            log.warning("保存索引库失败 (错误码 %d)", d.Everything_GetLastError())
 
 
 def _filetime_to_epoch(ft):
