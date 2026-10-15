@@ -11,7 +11,7 @@ DIST = os.path.join(HERE, "dist", "Glance")
 REL = os.path.join(HERE, "release")
 OUT = os.path.join(REL, "Glance-Setup")
 ZIP = os.path.join(REL, "Glance-Setup.zip")
-SCRIPTS = ["install.ps1", "uninstall.ps1", "Install-Glance.bat", "Uninstall-Glance.bat"]
+SCRIPTS = ["common.ps1", "install.ps1", "uninstall.ps1", "Install-Glance.bat", "Uninstall-Glance.bat"]
 
 README = """Glance —— 极简全局文件搜索
 

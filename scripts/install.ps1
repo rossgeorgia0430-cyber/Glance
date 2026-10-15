@@ -9,70 +9,22 @@
 param([switch]$NoShortcut, [switch]$NoAutostart, [switch]$Quiet)
 
 $ErrorActionPreference = 'Stop'
-$AppName = 'Glance'
+. (Join-Path $PSScriptRoot 'common.ps1')
 $ExeName = 'Glance.exe'
-$ServiceName = 'Everything (Glance)'
 $ServiceDisplayName = 'Glance Index Service'
-$Target = Join-Path $env:ProgramFiles $AppName
-$LegacyTarget = Join-Path $env:LOCALAPPDATA "Programs\$AppName"
-$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-
-function Info($m) { Write-Host "[Glance] $m" }
-
-function Test-Administrator {
-  $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-  $principal = New-Object Security.Principal.WindowsPrincipal($id)
-  return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
 
 if (-not (Test-Administrator)) {
   Info '需要管理员权限安装受保护的索引服务，正在请求授权…'
-  $args = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-  if ($NoShortcut) { $args += ' -NoShortcut' }
-  if ($NoAutostart) { $args += ' -NoAutostart' }
-  if ($Quiet) { $args += ' -Quiet' }
-  $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $args -Wait -PassThru
-  exit $p.ExitCode
-}
-
-function Remove-SafeTree([string]$Path, [string]$AllowedParent) {
-  if (-not (Test-Path -LiteralPath $Path)) { return }
-  $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-  $parent = [IO.Path]::GetFullPath($AllowedParent).TrimEnd('\')
-  if (-not $full.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase)) {
-    throw "拒绝删除预期目录之外的路径：$full"
-  }
-  # 进程退出后文件句柄可能延迟释放，短暂重试再放弃。
-  for ($i = 1; $i -le 10; $i++) {
-    try { Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop; return }
-    catch { if ($i -eq 10) { throw }; Start-Sleep -Milliseconds 300 }
-  }
-}
-
-function Stop-Indexer([string]$Base) {
-  foreach ($name in @('GlanceIndexer.exe', 'Everything.exe')) {
-    $indexer = Join-Path $Base "_internal\glance\bin\$name"
-    if (Test-Path -LiteralPath $indexer) {
-      try { & $indexer -instance Glance -quit | Out-Null } catch {}
-      try { & $indexer -instance Glance -uninstall-service | Out-Null } catch {}
-    }
-  }
-  # -quit 是异步 IPC，旧版还可能有残留进程占用安装目录。
-  # 仅按可执行文件路径强杀本安装目录内的进程，绝不误伤用户自己的 Everything。
-  if (Test-Path -LiteralPath $Base) {
-    $full = [IO.Path]::GetFullPath($Base).TrimEnd('\')
-    Get-Process -ErrorAction SilentlyContinue | Where-Object {
-      try { $_.Path -and $_.Path.StartsWith($full + '\', [StringComparison]::OrdinalIgnoreCase) }
-      catch { $false }
-    } | ForEach-Object {
-      try { $_.Kill(); $_.WaitForExit(3000) | Out-Null } catch {}
-    }
-  }
+  $extra = @()
+  if ($NoShortcut) { $extra += '-NoShortcut' }
+  if ($NoAutostart) { $extra += '-NoAutostart' }
+  if ($Quiet) { $extra += '-Quiet' }
+  Invoke-Elevated $PSCommandPath ($extra -join ' ')
 }
 
 # [1/7] 定位安装载荷
 $Payload = $null
-foreach ($c in @((Join-Path $Root $AppName), (Join-Path $Root "payload\$AppName"), (Join-Path $Root "..\dist\$AppName"))) {
+foreach ($c in @((Join-Path $PSScriptRoot $AppName), (Join-Path $PSScriptRoot "payload\$AppName"), (Join-Path $PSScriptRoot "..\dist\$AppName"))) {
   if (Test-Path (Join-Path $c $ExeName)) { $Payload = (Resolve-Path $c).Path; break }
 }
 if (-not $Payload) { throw "找不到程序载荷($ExeName)。请在解压后的目录运行本脚本。" }
@@ -80,15 +32,8 @@ Info "载荷：$Payload"
 
 # [2/7] 停旧版本和旧索引服务
 Info '停止旧版本…'
-Get-Process $AppName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Stop-Indexer $Target
-Stop-Indexer $LegacyTarget
-try {
-  $svc = Get-Service -Name $ServiceName -ErrorAction Stop
-  if ($svc.Status -ne 'Stopped') { Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue }
-  & sc.exe delete $ServiceName | Out-Null
-  Start-Sleep -Milliseconds 500
-} catch {}
+Stop-GlanceAll
+Start-Sleep -Milliseconds 500  # sc delete 是异步的，给服务控制管理器留点时间释放旧服务再重装
 
 # [3/7] 复制到受保护目录，同时迁移旧的每用户安装
 Info "安装到：$Target"
@@ -135,8 +80,7 @@ if (-not $NoShortcut) {
   $wsh = New-Object -ComObject WScript.Shell
   $startDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
   $desktopDir = [Environment]::GetFolderPath('Desktop')
-  foreach ($entry in @(@($startDir, $true), @($desktopDir, $false))) {
-    $dir = $entry[0]
+  foreach ($dir in @($startDir, $desktopDir)) {
     if (-not (Test-Path -LiteralPath $dir)) { continue }
     $lnk = Join-Path $dir "$AppName.lnk"
     $sc = $wsh.CreateShortcut($lnk)
@@ -151,7 +95,7 @@ if (-not $NoShortcut) {
   Info '已创建快捷方式（Ctrl+Alt+Shift+S 支持冷启动）'
 }
 
-# [7/7] 登录自启（隐藏常驻）；冷启动快捷键仍可在退出后重新拉起
+# [7/7] 登录自启（隐藏常驻）
 $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 if (-not $NoAutostart) {
   Set-ItemProperty -LiteralPath $RunKey -Name $AppName -Value "`"$Exe`" --tray" -Force
@@ -161,4 +105,5 @@ if (-not $NoAutostart) {
 }
 
 Info '安装完成。'
-if (-not $Quiet) { Start-Process -FilePath $Exe }
+# 本脚本运行在提权环境，直接启动会让 Glance 以管理员权限运行；经 explorer 转发可回落到普通用户权限。
+if (-not $Quiet) { Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$Exe`"" }
